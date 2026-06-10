@@ -1,6 +1,7 @@
 using EHealth.Pharmacy.Data;
 using EHealth.Pharmacy.Models;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace EHealth.Pharmacy.Endpoints;
 
@@ -84,10 +85,13 @@ public static class PharmacyEndpoints
             var zkpUrl = config["ZkpProverUrl"] ?? "http://zkp-prover:3005";
             var client = http.CreateClient();
 
+            var proof = JsonSerializer.Deserialize<JsonElement>(p.ProofJson ?? "{}");
+            var publicSignals = JsonSerializer.Deserialize<JsonElement>(p.PublicSignalsJson ?? "[]");
+
             var res = await client.PostAsJsonAsync($"{zkpUrl}/verify", new
             {
-                proof = p.ProofJson,
-                publicSignals = p.PublicSignalsJson
+                proof,
+                publicSignals
             });
 
             if (!res.IsSuccessStatusCode) return false;
