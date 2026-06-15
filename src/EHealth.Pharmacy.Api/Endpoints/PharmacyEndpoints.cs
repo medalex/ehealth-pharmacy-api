@@ -61,13 +61,22 @@ public static class PharmacyEndpoints
             return Results.Ok(new { id, verified = isValid, status = prescription.Status.ToString() });
         });
 
-        // Dispense: only allowed when status is Verified
-        group.MapPost("/{id:guid}/dispense", async (Guid id, AppDbContext db) =>
+        // Dispense: only allowed when status is Verified and patient has given consent
+        group.MapPost("/{id:guid}/dispense", async (
+            Guid id, AppDbContext db,
+            IHttpClientFactory http, IConfiguration config) =>
         {
             var prescription = await db.Prescriptions.FindAsync(id);
             if (prescription is null) return Results.NotFound();
             if (prescription.Status != PrescriptionStatus.Verified)
                 return Results.BadRequest("Prescription must be verified before dispensing");
+
+            // Проверяем consent пациента на доступ аптеки к его данным
+            var orgId = config["PharmacyOrganizationId"] ?? "pharmacy-1";
+            if (!await CheckConsent(prescription.PatientId, orgId, http, config))
+                return Results.Json(
+                    new { error = $"Patient {prescription.PatientId} has not granted consent to {orgId}" },
+                    statusCode: 403);
 
             prescription.Status = PrescriptionStatus.Dispensed;
             prescription.DispensedAt = DateTime.UtcNow;
@@ -75,6 +84,20 @@ public static class PharmacyEndpoints
 
             return Results.Ok(new { id, dispensedAt = prescription.DispensedAt });
         });
+    }
+
+    private static async Task<bool> CheckConsent(
+        Guid patientId, string organizationId, IHttpClientFactory http, IConfiguration config)
+    {
+        try
+        {
+            var patientApiUrl = config["PatientApiUrl"] ?? "http://patient-api:3001";
+            var client = http.CreateClient();
+            var resp = await client.GetAsync(
+                $"{patientApiUrl}/api/consents/check?patientId={patientId}&organizationId={organizationId}");
+            return resp.IsSuccessStatusCode;
+        }
+        catch { return false; }
     }
 
     private static async Task<bool> VerifyWithZkpProver(
