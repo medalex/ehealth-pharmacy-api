@@ -8,6 +8,6 @@ public static class Seeder
 
     public static void Seed(AppDbContext db)
     {
-        // Сидер намеренно пуст — очередь начинается чистой для демонстрации полного цикла
+        // Intentionally empty — queue starts clean to demonstrate the full flow
     }
 }

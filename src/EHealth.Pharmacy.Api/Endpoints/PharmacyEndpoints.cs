@@ -71,7 +71,7 @@ public static class PharmacyEndpoints
             if (prescription.Status != PrescriptionStatus.Verified)
                 return Results.BadRequest("Prescription must be verified before dispensing");
 
-            // Проверяем consent пациента на доступ аптеки к его данным
+            // Check patient consent for pharmacy data access
             var orgId = config["PharmacyOrganizationId"] ?? "pharmacy-1";
             if (!await CheckConsent(prescription.PatientId, orgId, http, config))
                 return Results.Json(
