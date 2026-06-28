@@ -52,6 +52,21 @@ public static class PharmacyEndpoints
             if (prescription.Status == PrescriptionStatus.Dispensed)
                 return Results.BadRequest("Prescription already dispensed");
 
+            // Replay guard: a proof (stmtHash) may be accepted only once. If another
+            // prescription with the same stmtHash was already verified/dispensed, this is
+            // a replay of the same proof — reject. (Prototype-level spent registry; an
+            // on-chain immutable registry is the production form — see paper R9.)
+            var replayed = await db.Prescriptions.AnyAsync(x =>
+                x.Id != id && x.StmtHash == prescription.StmtHash &&
+                (x.Status == PrescriptionStatus.Verified || x.Status == PrescriptionStatus.Dispensed));
+            if (replayed)
+            {
+                prescription.Status = PrescriptionStatus.Rejected;
+                prescription.VerifiedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync();
+                return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already used" });
+            }
+
             var isValid = await VerifyWithZkpProver(prescription, http, config);
 
             prescription.Status = isValid ? PrescriptionStatus.Verified : PrescriptionStatus.Rejected;
