@@ -67,38 +67,33 @@ public static class PharmacyEndpoints
                 return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already used" });
             }
 
-            var isValid = await VerifyWithZkpProver(prescription, http, config);
-            if (!isValid)
+            // On-chain verification + anchoring: public inputs are pinned to DKG governance,
+            // then the proof is cryptographically verified by the on-chain Groth16 verifier
+            // and the decision is recorded in the immutable on-chain registry (paper R9).
+            var outcome = await VerifyAndRecordOnChain(prescription, http, config);
+            switch (outcome)
             {
-                prescription.Status = PrescriptionStatus.Rejected;
-                prescription.VerifiedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync();
-                return Results.Ok(new { id, verified = false, status = "Rejected" });
+                case VerifyOutcome.Replay:
+                    prescription.Status = PrescriptionStatus.Rejected;
+                    prescription.VerifiedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync();
+                    return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already recorded on-chain" });
+                case VerifyOutcome.ProofInvalid:
+                    prescription.Status = PrescriptionStatus.Rejected;
+                    prescription.VerifiedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync();
+                    return Results.Ok(new { id, verified = false, status = "Rejected" });
+                case VerifyOutcome.Unavailable:
+                    prescription.Status = PrescriptionStatus.Rejected;
+                    prescription.VerifiedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync();
+                    return Results.Json(new { id, verified = false, status = "Rejected", reason = "on-chain verifier unavailable" }, statusCode: 503);
+                default:
+                    prescription.Status = PrescriptionStatus.Verified;
+                    prescription.VerifiedAt = DateTime.UtcNow;
+                    await db.SaveChangesAsync();
+                    return Results.Ok(new { id, verified = true, status = prescription.Status.ToString() });
             }
-
-            // Anchor the accepted decision in the on-chain decision registry (immutable
-            // audit trail + authoritative on-chain replay protection — paper R9).
-            var anchor = await RecordDecisionOnChain(prescription.StmtHash, prescription.Outcome, http, config);
-            if (anchor == AnchorResult.Replay)
-            {
-                prescription.Status = PrescriptionStatus.Rejected;
-                prescription.VerifiedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync();
-                return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already recorded on-chain" });
-            }
-            if (anchor == AnchorResult.Unavailable)
-            {
-                prescription.Status = PrescriptionStatus.Rejected;
-                prescription.VerifiedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync();
-                return Results.Json(new { id, verified = false, status = "Rejected", reason = "decision registry unavailable" }, statusCode: 503);
-            }
-
-            prescription.Status = PrescriptionStatus.Verified;
-            prescription.VerifiedAt = DateTime.UtcNow;
-            await db.SaveChangesAsync();
-
-            return Results.Ok(new { id, verified = true, status = prescription.Status.ToString() });
         });
 
         // Dispense: only allowed when status is Verified and patient has given consent
@@ -140,53 +135,36 @@ public static class PharmacyEndpoints
         catch { return false; }
     }
 
-    private enum AnchorResult { Recorded, Replay, Unavailable }
+    private enum VerifyOutcome { Verified, ProofInvalid, Replay, Unavailable }
 
-    // Records the accepted decision (stmtHash, outcome) in the on-chain decision registry.
-    // 409 → the proof was already recorded (replay); non-success/unreachable → unavailable.
-    private static async Task<AnchorResult> RecordDecisionOnChain(
-        string? stmtHash, bool outcome, IHttpClientFactory http, IConfiguration config)
-    {
-        try
-        {
-            var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
-            var client = http.CreateClient();
-            var resp = await client.PostAsJsonAsync($"{url}/record", new { stmtHash, outcome });
-            if ((int)resp.StatusCode == 409) return AnchorResult.Replay;
-            return resp.IsSuccessStatusCode ? AnchorResult.Recorded : AnchorResult.Unavailable;
-        }
-        catch { return AnchorResult.Unavailable; }
-    }
-
-    private static async Task<bool> VerifyWithZkpProver(
+    // Verifies the proof on-chain (Groth16 verifier contract) and records the decision in
+    // the immutable on-chain registry. First pins the public inputs to DKG governance +
+    // patient roots (a valid proof over fabricated public inputs is rejected). The EVM node
+    // verifies (π, pub) and, if valid, records (stmtHash, outcome); 409 → replay.
+    private static async Task<VerifyOutcome> VerifyAndRecordOnChain(
         ReceivedPrescription p, IHttpClientFactory http, IConfiguration config)
     {
         try
         {
-            var zkpUrl = config["ZkpProverUrl"] ?? "http://zkp-prover:3005";
-            var client = http.CreateClient();
-
             var proof = JsonSerializer.Deserialize<JsonElement>(p.ProofJson ?? "{}");
             var publicSignals = JsonSerializer.Deserialize<JsonElement>(p.PublicSignalsJson ?? "[]");
 
-            // Verifier-side pinning: the public parameters carried in the proof must match
-            // the DKG governance + patient roots — a valid proof over fabricated public
-            // inputs (forged formulary, registry root, or patient/lab record root) is rejected.
+            // Verifier-side pinning (application layer): public parameters must match the
+            // DKG governance values and the patient's current record roots.
             if (!await PinPublicSignalsToGovernance(publicSignals, p.PatientId, http, config))
-                return false;
+                return VerifyOutcome.ProofInvalid;
 
-            var res = await client.PostAsJsonAsync($"{zkpUrl}/verify", new
-            {
-                proof,
-                publicSignals
-            });
-
-            if (!res.IsSuccessStatusCode) return false;
+            var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
+            var client = http.CreateClient();
+            var res = await client.PostAsJsonAsync($"{url}/verify-and-record", new { proof, publicSignals });
+            if ((int)res.StatusCode == 409) return VerifyOutcome.Replay;
+            if (!res.IsSuccessStatusCode) return VerifyOutcome.Unavailable;
             var result = await res.Content.ReadFromJsonAsync<VerifyResult>();
-            return result?.Valid ?? false;
+            return (result?.Verified ?? false) ? VerifyOutcome.Verified : VerifyOutcome.ProofInvalid;
         }
-        catch { return false; }
+        catch { return VerifyOutcome.Unavailable; }
     }
+
 
     // Public-signal indices (must match the prover's PUB layout).
     private const int IdxValidCredentialRoot = 3;
@@ -252,5 +230,5 @@ public static class PharmacyEndpoints
         int DrugId, string DrugName, string Dosage, Guid PatientId,
         string StmtHash, string ProofJson, string PublicSignalsJson, bool Outcome);
 
-    private record VerifyResult(bool Valid);
+    private record VerifyResult(bool Verified);
 }
