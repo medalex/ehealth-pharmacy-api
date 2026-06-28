@@ -111,10 +111,10 @@ public static class PharmacyEndpoints
             var proof = JsonSerializer.Deserialize<JsonElement>(p.ProofJson ?? "{}");
             var publicSignals = JsonSerializer.Deserialize<JsonElement>(p.PublicSignalsJson ?? "[]");
 
-            // Verifier-side pinning: the public policy parameters carried in the proof must
-            // match the DKG governance values — a valid proof over fabricated public inputs
-            // (e.g. a forged drug formulary or registry root) is rejected here.
-            if (!await PinPublicSignalsToGovernance(publicSignals, http, config))
+            // Verifier-side pinning: the public parameters carried in the proof must match
+            // the DKG governance + patient roots — a valid proof over fabricated public
+            // inputs (forged formulary, registry root, or patient/lab record root) is rejected.
+            if (!await PinPublicSignalsToGovernance(publicSignals, p.PatientId, http, config))
                 return false;
 
             var res = await client.PostAsJsonAsync($"{zkpUrl}/verify", new
@@ -132,13 +132,16 @@ public static class PharmacyEndpoints
 
     // Public-signal indices (must match the prover's PUB layout).
     private const int IdxValidCredentialRoot = 3;
+    private const int IdxPatientRecordRoot = 4;
     private const int IdxPolicyDrugId0 = 6;          // policyDrugIds → 6,7,8
     private const int IdxContraindicationRoot = 12;
+    private const int IdxLabRecordRoot = 13;
 
-    // Checks that the proof's public policy parameters equal the DKG-committed governance
-    // values (credential registry root, drug formulary, contraindication-closure root).
+    // Checks that the proof's public parameters equal the DKG-committed governance values
+    // (credential registry root, drug formulary, contraindication-closure root) and the
+    // patient's current DKG record roots (allergy + lab), pinning every public input.
     private static async Task<bool> PinPublicSignalsToGovernance(
-        JsonElement publicSignals, IHttpClientFactory http, IConfiguration config)
+        JsonElement publicSignals, Guid patientId, IHttpClientFactory http, IConfiguration config)
     {
         try
         {
@@ -169,6 +172,18 @@ public static class PharmacyEndpoints
             var expected = drugIds.EnumerateArray().Select(x => x.GetInt32().ToString()).ToArray();
             for (var i = 0; i < expected.Length && i < 3; i++)
                 if (ps[IdxPolicyDrugId0 + i] != expected[i]) return false;
+
+            // Patient allergy-record root (per-patient, from DKG).
+            var recResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/patient-record/{patientId}/proof");
+            if (!recResp.TryGetProperty("data", out var recData) ||
+                !recData.TryGetProperty("patientRecordRoot", out var recRoot)) return false;
+            if (ps[IdxPatientRecordRoot] != recRoot.GetString()) return false;
+
+            // Patient lab-record root (per-patient, from DKG).
+            var labResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/lab-record/{patientId}");
+            if (!labResp.TryGetProperty("data", out var labData) ||
+                !labData.TryGetProperty("labRecordRoot", out var labRoot)) return false;
+            if (ps[IdxLabRecordRoot] != labRoot.GetString()) return false;
 
             return true;
         }
