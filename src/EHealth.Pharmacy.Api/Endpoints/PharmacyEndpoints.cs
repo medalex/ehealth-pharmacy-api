@@ -68,12 +68,37 @@ public static class PharmacyEndpoints
             }
 
             var isValid = await VerifyWithZkpProver(prescription, http, config);
+            if (!isValid)
+            {
+                prescription.Status = PrescriptionStatus.Rejected;
+                prescription.VerifiedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync();
+                return Results.Ok(new { id, verified = false, status = "Rejected" });
+            }
 
-            prescription.Status = isValid ? PrescriptionStatus.Verified : PrescriptionStatus.Rejected;
+            // Anchor the accepted decision in the on-chain decision registry (immutable
+            // audit trail + authoritative on-chain replay protection — paper R9).
+            var anchor = await RecordDecisionOnChain(prescription.StmtHash, prescription.Outcome, http, config);
+            if (anchor == AnchorResult.Replay)
+            {
+                prescription.Status = PrescriptionStatus.Rejected;
+                prescription.VerifiedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync();
+                return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already recorded on-chain" });
+            }
+            if (anchor == AnchorResult.Unavailable)
+            {
+                prescription.Status = PrescriptionStatus.Rejected;
+                prescription.VerifiedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync();
+                return Results.Json(new { id, verified = false, status = "Rejected", reason = "decision registry unavailable" }, statusCode: 503);
+            }
+
+            prescription.Status = PrescriptionStatus.Verified;
             prescription.VerifiedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
 
-            return Results.Ok(new { id, verified = isValid, status = prescription.Status.ToString() });
+            return Results.Ok(new { id, verified = true, status = prescription.Status.ToString() });
         });
 
         // Dispense: only allowed when status is Verified and patient has given consent
@@ -113,6 +138,24 @@ public static class PharmacyEndpoints
             return resp.IsSuccessStatusCode;
         }
         catch { return false; }
+    }
+
+    private enum AnchorResult { Recorded, Replay, Unavailable }
+
+    // Records the accepted decision (stmtHash, outcome) in the on-chain decision registry.
+    // 409 → the proof was already recorded (replay); non-success/unreachable → unavailable.
+    private static async Task<AnchorResult> RecordDecisionOnChain(
+        string? stmtHash, bool outcome, IHttpClientFactory http, IConfiguration config)
+    {
+        try
+        {
+            var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
+            var client = http.CreateClient();
+            var resp = await client.PostAsJsonAsync($"{url}/record", new { stmtHash, outcome });
+            if ((int)resp.StatusCode == 409) return AnchorResult.Replay;
+            return resp.IsSuccessStatusCode ? AnchorResult.Recorded : AnchorResult.Unavailable;
+        }
+        catch { return AnchorResult.Unavailable; }
     }
 
     private static async Task<bool> VerifyWithZkpProver(
