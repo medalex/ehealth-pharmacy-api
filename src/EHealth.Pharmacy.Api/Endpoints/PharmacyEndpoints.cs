@@ -111,6 +111,12 @@ public static class PharmacyEndpoints
             var proof = JsonSerializer.Deserialize<JsonElement>(p.ProofJson ?? "{}");
             var publicSignals = JsonSerializer.Deserialize<JsonElement>(p.PublicSignalsJson ?? "[]");
 
+            // Verifier-side pinning: the public policy parameters carried in the proof must
+            // match the DKG governance values — a valid proof over fabricated public inputs
+            // (e.g. a forged drug formulary or registry root) is rejected here.
+            if (!await PinPublicSignalsToGovernance(publicSignals, http, config))
+                return false;
+
             var res = await client.PostAsJsonAsync($"{zkpUrl}/verify", new
             {
                 proof,
@@ -120,6 +126,51 @@ public static class PharmacyEndpoints
             if (!res.IsSuccessStatusCode) return false;
             var result = await res.Content.ReadFromJsonAsync<VerifyResult>();
             return result?.Valid ?? false;
+        }
+        catch { return false; }
+    }
+
+    // Public-signal indices (must match the prover's PUB layout).
+    private const int IdxValidCredentialRoot = 3;
+    private const int IdxPolicyDrugId0 = 6;          // policyDrugIds → 6,7,8
+    private const int IdxContraindicationRoot = 12;
+
+    // Checks that the proof's public policy parameters equal the DKG-committed governance
+    // values (credential registry root, drug formulary, contraindication-closure root).
+    private static async Task<bool> PinPublicSignalsToGovernance(
+        JsonElement publicSignals, IHttpClientFactory http, IConfiguration config)
+    {
+        try
+        {
+            if (publicSignals.ValueKind != JsonValueKind.Array) return false;
+            var ps = publicSignals.EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
+            if (ps.Length < 20) return false; // circuit nPublic
+
+            var mfssiaUrl = config["MfssiaUrl"] ?? "http://mfssia-ehealth:4000/api";
+            var client = http.CreateClient();
+
+            // Physician registry root.
+            var credResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/physician-registry/merkle-root");
+            if (!credResp.TryGetProperty("data", out var credData) ||
+                !credData.TryGetProperty("root", out var credRoot)) return false;
+            if (ps[IdxValidCredentialRoot] != credRoot.GetString()) return false;
+
+            // Contraindication-closure root.
+            var contraResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/contraindication/root");
+            if (!contraResp.TryGetProperty("data", out var contraData) ||
+                !contraData.TryGetProperty("contraindicationRoot", out var contraRoot)) return false;
+            if (ps[IdxContraindicationRoot] != contraRoot.GetString()) return false;
+
+            // Drug formulary (policyDrugIds).
+            var drugsResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/contraindication/drugs");
+            if (!drugsResp.TryGetProperty("data", out var drugsData) ||
+                !drugsData.TryGetProperty("drugIds", out var drugIds) ||
+                drugIds.ValueKind != JsonValueKind.Array) return false;
+            var expected = drugIds.EnumerateArray().Select(x => x.GetInt32().ToString()).ToArray();
+            for (var i = 0; i < expected.Length && i < 3; i++)
+                if (ps[IdxPolicyDrugId0 + i] != expected[i]) return false;
+
+            return true;
         }
         catch { return false; }
     }
