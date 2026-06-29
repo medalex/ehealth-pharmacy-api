@@ -154,6 +154,10 @@ public static class PharmacyEndpoints
             if (!await PinPublicSignalsToGovernance(publicSignals, p.PatientId, http, config))
                 return VerifyOutcome.ProofInvalid;
 
+            // Off-circuit freshness check (the circuit no longer compares time in-circuit).
+            if (!IsWithinValidity(publicSignals))
+                return VerifyOutcome.ProofInvalid;
+
             var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
             var client = http.CreateClient();
             var res = await client.PostAsJsonAsync($"{url}/verify-and-record", new { proof, publicSignals });
@@ -167,11 +171,31 @@ public static class PharmacyEndpoints
 
 
     // Public-signal indices (must match the prover's PUB layout).
-    private const int IdxValidCredentialRoot = 3;
-    private const int IdxPatientRecordRoot = 4;
-    private const int IdxPolicyDrugId0 = 6;          // policyDrugIds → 6,7,8
-    private const int IdxContraindicationRoot = 12;
-    private const int IdxLabRecordRoot = 13;
+    private const int IdxIssuanceTime = 2;
+    private const int IdxValidFor = 3;
+    private const int IdxValidCredentialRoot = 4;
+    private const int IdxPatientRecordRoot = 5;
+    private const int IdxPolicyDrugId0 = 7;          // policyDrugIds → 7,8,9
+    private const int IdxContraindicationRoot = 13;
+    private const int IdxLabRecordRoot = 14;
+
+    // Off-circuit freshness: the prescription must be within its validity window.
+    // issuanceTime + validFor are public inputs (and bound into stmtHash), so they cannot
+    // be forged; the dispensing-time check belongs here, where "now" is meaningful.
+    private static bool IsWithinValidity(JsonElement publicSignals)
+    {
+        try
+        {
+            if (publicSignals.ValueKind != JsonValueKind.Array) return false;
+            var ps = publicSignals.EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
+            if (ps.Length <= IdxValidFor) return false;
+            var issued = long.Parse(ps[IdxIssuanceTime]);
+            var validFor = long.Parse(ps[IdxValidFor]);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            return now <= issued + validFor;
+        }
+        catch { return false; }
+    }
 
     // Checks that the proof's public parameters equal the DKG-committed governance values
     // (credential registry root, drug formulary, contraindication-closure root) and the
@@ -183,7 +207,7 @@ public static class PharmacyEndpoints
         {
             if (publicSignals.ValueKind != JsonValueKind.Array) return false;
             var ps = publicSignals.EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
-            if (ps.Length < 20) return false; // circuit nPublic
+            if (ps.Length < 21) return false; // circuit nPublic
 
             var mfssiaUrl = config["MfssiaUrl"] ?? "http://mfssia-ehealth:4000/api";
             var client = http.CreateClient();
