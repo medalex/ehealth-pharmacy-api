@@ -67,17 +67,14 @@ public static class PharmacyEndpoints
                 return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already used" });
             }
 
-            // On-chain verification + anchoring: public inputs are pinned to DKG governance,
-            // then the proof is cryptographically verified by the on-chain Groth16 verifier
-            // and the decision is recorded in the immutable on-chain registry (paper R9).
-            var outcome = await VerifyAndRecordOnChain(prescription, http, config);
+            // On-chain verification only (no registry write yet): public inputs are pinned to
+            // DKG governance and the proof is cryptographically verified by the on-chain Groth16
+            // verifier. The immutable on-chain record happens at dispensing, after consent — so
+            // the registry contains only dispensed prescriptions (paper R9).
+            var outcome = await VerifyProofOnChain(prescription, record: false, http, config);
             switch (outcome)
             {
-                case VerifyOutcome.Replay:
-                    prescription.Status = PrescriptionStatus.Rejected;
-                    prescription.VerifiedAt = DateTime.UtcNow;
-                    await db.SaveChangesAsync();
-                    return Results.Ok(new { id, verified = false, status = "Rejected", reason = "replay: stmtHash already recorded on-chain" });
+                case VerifyOutcome.Replay: // not expected without recording, handled defensively
                 case VerifyOutcome.ProofInvalid:
                     prescription.Status = PrescriptionStatus.Rejected;
                     prescription.VerifiedAt = DateTime.UtcNow;
@@ -106,12 +103,25 @@ public static class PharmacyEndpoints
             if (prescription.Status != PrescriptionStatus.Verified)
                 return Results.BadRequest("Prescription must be verified before dispensing");
 
-            // Check patient consent for pharmacy data access
+            // Consent first: the patient must have granted the pharmacy access.
             var orgId = config["PharmacyOrganizationId"] ?? "pharmacy-1";
             if (!await CheckConsent(prescription.PatientId, orgId, http, config))
                 return Results.Json(
                     new { error = $"Patient {prescription.PatientId} has not granted consent to {orgId}" },
                     statusCode: 403);
+
+            // Only now write the decision to the immutable on-chain registry — so the registry
+            // contains only dispensed prescriptions. 409 → already recorded (double dispense).
+            var anchor = await VerifyProofOnChain(prescription, record: true, http, config);
+            switch (anchor)
+            {
+                case VerifyOutcome.Replay:
+                    return Results.Json(new { id, error = "replay: stmtHash already recorded on-chain" }, statusCode: 409);
+                case VerifyOutcome.ProofInvalid:
+                    return Results.BadRequest(new { id, error = "proof no longer valid at dispensing" });
+                case VerifyOutcome.Unavailable:
+                    return Results.Json(new { id, error = "on-chain registry unavailable" }, statusCode: 503);
+            }
 
             prescription.Status = PrescriptionStatus.Dispensed;
             prescription.DispensedAt = DateTime.UtcNow;
@@ -137,12 +147,13 @@ public static class PharmacyEndpoints
 
     private enum VerifyOutcome { Verified, ProofInvalid, Replay, Unavailable }
 
-    // Verifies the proof on-chain (Groth16 verifier contract) and records the decision in
-    // the immutable on-chain registry. First pins the public inputs to DKG governance +
-    // patient roots (a valid proof over fabricated public inputs is rejected). The EVM node
-    // verifies (π, pub) and, if valid, records (stmtHash, outcome); 409 → replay.
-    private static async Task<VerifyOutcome> VerifyAndRecordOnChain(
-        ReceivedPrescription p, IHttpClientFactory http, IConfiguration config)
+    // Verifies the proof on-chain (Groth16 verifier contract) after pinning public inputs to
+    // DKG governance + patient roots and checking freshness. When record=false the EVM node
+    // only verifies (view); when record=true it also writes the decision to the immutable
+    // registry — so the registry receives only dispensed prescriptions (consent checked first).
+    // 409 → already recorded (record=true only).
+    private static async Task<VerifyOutcome> VerifyProofOnChain(
+        ReceivedPrescription p, bool record, IHttpClientFactory http, IConfiguration config)
     {
         try
         {
@@ -159,8 +170,9 @@ public static class PharmacyEndpoints
                 return VerifyOutcome.ProofInvalid;
 
             var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
+            var endpoint = record ? "verify-and-record" : "verify";
             var client = http.CreateClient();
-            var res = await client.PostAsJsonAsync($"{url}/verify-and-record", new { proof, publicSignals });
+            var res = await client.PostAsJsonAsync($"{url}/{endpoint}", new { proof, publicSignals });
             if ((int)res.StatusCode == 409) return VerifyOutcome.Replay;
             if (!res.IsSuccessStatusCode) return VerifyOutcome.Unavailable;
             var result = await res.Content.ReadFromJsonAsync<VerifyResult>();
