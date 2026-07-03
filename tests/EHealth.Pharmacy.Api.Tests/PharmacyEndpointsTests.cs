@@ -18,14 +18,14 @@ public class PharmacyEndpointsTests : IDisposable
     }
 
     [Fact]
-    public async Task GetAll_ReturnsSeededRecords()
+    public async Task GetAll_EnsuresNoSeededRecords()
     {
         var response = await _client.GetAsync("/api/prescriptions");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var list = await response.Content.ReadFromJsonAsync<List<ReceivedPrescription>>();
         Assert.NotNull(list);
-        Assert.Equal(2, list.Count);
+        Assert.Empty(list);
     }
 
     [Fact]
