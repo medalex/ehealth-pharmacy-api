@@ -162,7 +162,12 @@ public static class PharmacyEndpoints
 
             // Verifier-side pinning (application layer): public parameters must match the
             // DKG governance values and the patient's current record roots.
-            if (!await PinPublicSignalsToGovernance(publicSignals, p.PatientId, http, config))
+            // PROBE BUILD ONLY — latency decomposition, timed in the real caller so the
+            // on-chain slice is separated from the pharmacy's own plumbing.
+            var _swPin = System.Diagnostics.Stopwatch.StartNew();
+            var _pinned = await PinPublicSignalsToGovernance(publicSignals, p.PatientId, http, config);
+            Console.WriteLine($"[timing] pin_governance ms={_swPin.Elapsed.TotalMilliseconds:F1}");
+            if (!_pinned)
                 return VerifyOutcome.ProofInvalid;
 
             // Off-circuit freshness check (the circuit no longer compares time in-circuit).
@@ -172,7 +177,9 @@ public static class PharmacyEndpoints
             var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
             var endpoint = record ? "verify-and-record" : "verify";
             var client = http.CreateClient();
+            var _swEvm = System.Diagnostics.Stopwatch.StartNew();
             var res = await client.PostAsJsonAsync($"{url}/{endpoint}", new { proof, publicSignals });
+            Console.WriteLine($"[timing] evm_call endpoint={endpoint} ms={_swEvm.Elapsed.TotalMilliseconds:F1}");
             if ((int)res.StatusCode == 409) return VerifyOutcome.Replay;
             if (!res.IsSuccessStatusCode) return VerifyOutcome.Unavailable;
             var result = await res.Content.ReadFromJsonAsync<VerifyResult>();
