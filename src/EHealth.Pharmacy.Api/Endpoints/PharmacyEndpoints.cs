@@ -56,9 +56,11 @@ public static class PharmacyEndpoints
             // prescription with the same stmtHash was already verified/dispensed, this is
             // a replay of the same proof — reject. (Prototype-level spent registry; an
             // on-chain immutable registry is the production form — see paper R9.)
+            var _swReplay = System.Diagnostics.Stopwatch.StartNew();
             var replayed = await db.Prescriptions.AnyAsync(x =>
                 x.Id != id && x.StmtHash == prescription.StmtHash &&
                 (x.Status == PrescriptionStatus.Verified || x.Status == PrescriptionStatus.Dispensed));
+            Console.WriteLine($"[timing] replay_check ms={_swReplay.Elapsed.TotalMilliseconds:F3}");
             if (replayed)
             {
                 prescription.Status = PrescriptionStatus.Rejected;
@@ -171,7 +173,10 @@ public static class PharmacyEndpoints
                 return VerifyOutcome.ProofInvalid;
 
             // Off-circuit freshness check (the circuit no longer compares time in-circuit).
-            if (!IsWithinValidity(publicSignals))
+            var _swFresh = System.Diagnostics.Stopwatch.StartNew();
+            var _fresh = IsWithinValidity(publicSignals);
+            Console.WriteLine($"[timing] freshness_check ms={_swFresh.Elapsed.TotalMilliseconds:F3}");
+            if (!_fresh)
                 return VerifyOutcome.ProofInvalid;
 
             var url = config["DecisionRegistryUrl"] ?? "http://decision-registry:3010";
