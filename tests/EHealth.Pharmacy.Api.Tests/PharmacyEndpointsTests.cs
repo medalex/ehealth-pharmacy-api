@@ -17,13 +17,34 @@ public class PharmacyEndpointsTests : IDisposable
         _client = _factory.CreateClient();
     }
 
+    // Nothing is seeded — prescriptions arrive from the hospital during the demo — so every
+    // test that needs one posts it first.
+    private async Task<ReceivedPrescription> Receive(
+        int drugId = 3, string drugName = "Ibuprofen", string stmtHash = "0xtest001")
+    {
+        var response = await _client.PostAsJsonAsync("/api/prescriptions/receive", new
+        {
+            drugId,
+            drugName,
+            dosage = "400mg 3x/day",
+            patientId = Pat1,
+            stmtHash,
+            proofJson = "{}",
+            publicSignalsJson = "[]",
+            outcome = true,
+        });
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<ReceivedPrescription>(TestFactory.Json))!;
+    }
+
     [Fact]
     public async Task GetAll_EnsuresNoSeededRecords()
     {
         var response = await _client.GetAsync("/api/prescriptions");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var list = await response.Content.ReadFromJsonAsync<List<ReceivedPrescription>>();
+        var list = await response.Content.ReadFromJsonAsync<List<ReceivedPrescription>>(TestFactory.Json);
         Assert.NotNull(list);
         Assert.Empty(list);
     }
@@ -31,14 +52,13 @@ public class PharmacyEndpointsTests : IDisposable
     [Fact]
     public async Task GetById_KnownId_ReturnsPrescription()
     {
-        var all = await _client.GetFromJsonAsync<List<ReceivedPrescription>>("/api/prescriptions");
-        var id = all![0].Id;
+        var created = await Receive();
 
-        var response = await _client.GetAsync($"/api/prescriptions/{id}");
+        var response = await _client.GetAsync($"/api/prescriptions/{created.Id}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var p = await response.Content.ReadFromJsonAsync<ReceivedPrescription>();
-        Assert.Equal(id, p!.Id);
+        var p = await response.Content.ReadFromJsonAsync<ReceivedPrescription>(TestFactory.Json);
+        Assert.Equal(created.Id, p!.Id);
     }
 
     [Fact]
@@ -52,24 +72,9 @@ public class PharmacyEndpointsTests : IDisposable
     [Fact]
     public async Task Receive_CreatesPrescription_WithReceivedStatus()
     {
-        var req = new
-        {
-            drugId = 3,
-            drugName = "Ibuprofen",
-            dosage = "400mg 3x/day",
-            patientId = Pat1,
-            stmtHash = "0xtest001",
-            proofJson = "{}",
-            publicSignalsJson = "[]",
-            outcome = true
-        };
+        var created = await Receive();
 
-        var response = await _client.PostAsJsonAsync("/api/prescriptions/receive", req);
-
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        var created = await response.Content.ReadFromJsonAsync<ReceivedPrescription>();
-        Assert.NotNull(created);
-        Assert.NotEqual(Guid.Empty, created!.Id);
+        Assert.NotEqual(Guid.Empty, created.Id);
         Assert.Equal("Ibuprofen", created.DrugName);
         Assert.Equal(PrescriptionStatus.Received, created.Status);
         Assert.Null(created.VerifiedAt);
@@ -79,36 +84,36 @@ public class PharmacyEndpointsTests : IDisposable
     [Fact]
     public async Task Dispense_WithoutVerify_ReturnsBadRequest()
     {
-        var req = new
-        {
-            drugId = 4,
-            drugName = "Aspirin",
-            dosage = "100mg/day",
-            patientId = Pat1,
-            stmtHash = "0xtest002",
-            proofJson = "{}",
-            publicSignalsJson = "[]",
-            outcome = true
-        };
+        var created = await Receive(drugId: 4, drugName: "Aspirin", stmtHash: "0xtest002");
 
-        var create = await _client.PostAsJsonAsync("/api/prescriptions/receive", req);
-        var created = await create.Content.ReadFromJsonAsync<ReceivedPrescription>();
-
-        var dispense = await _client.PostAsync($"/api/prescriptions/{created!.Id}/dispense", null);
+        var dispense = await _client.PostAsync($"/api/prescriptions/{created.Id}/dispense", null);
 
         Assert.Equal(HttpStatusCode.BadRequest, dispense.StatusCode);
     }
 
     [Fact]
-    public async Task Dispense_AlreadyVerifiedSeedRecord_ReturnsOk()
+    public async Task Dispense_VerifiedWithoutConsent_ReturnsForbidden()
     {
-        // Seeder plants a prescription with Status=Verified
-        var all = await _client.GetFromJsonAsync<List<ReceivedPrescription>>("/api/prescriptions");
-        var verified = all!.First(p => p.Status == PrescriptionStatus.Verified);
+        // The consent gate runs after the Verified check and before the on-chain registry
+        // write, so a verified prescription is still refused while consent is missing.
+        var verified = new ReceivedPrescription
+        {
+            DrugId = 5,
+            DrugName = "Amoxicillin",
+            Dosage = "500mg 2x/day",
+            PatientId = Pat1,
+            StmtHash = "0xtest003",
+            ProofJson = "{}",
+            PublicSignalsJson = "[]",
+            Outcome = true,
+            Status = PrescriptionStatus.Verified,
+            VerifiedAt = DateTime.UtcNow,
+        };
+        await _factory.SeedAsync(verified);
 
         var response = await _client.PostAsync($"/api/prescriptions/{verified.Id}/dispense", null);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]
