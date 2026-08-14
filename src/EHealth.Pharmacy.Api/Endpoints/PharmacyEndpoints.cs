@@ -221,7 +221,7 @@ public static class PharmacyEndpoints
             var ps = publicSignals.EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
             if (ps.Length < 21) return false; // circuit nPublic
 
-            var mfssiaUrl = config["MfssiaUrl"] ?? "http://mfssia-ehealth:4000/api";
+            var mfssiaUrl = Mfssia.BaseUrl(config);
             var client = http.CreateClient();
 
             // Physician registry root.
