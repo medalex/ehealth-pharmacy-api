@@ -210,38 +210,32 @@ public static class PharmacyEndpoints
             var mfssiaUrl = Mfssia.BaseUrl(config);
             var client = http.CreateClient();
 
-            // Physician registry root.
-            var credResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/physician-registry/merkle-root");
-            if (!credResp.TryGetProperty("data", out var credData) ||
-                !credData.TryGetProperty("root", out var credRoot)) return false;
-            if (ps[IdxValidCredentialRoot] != credRoot.GetString()) return false;
+            // Each committed root: where mfssia serves it, the property carrying it, and the
+            // public signal that must equal it. The first four are single-valued.
+            var pinned = new (string Url, string Property, int Index)[]
+            {
+                ($"{mfssiaUrl}/physician-registry/merkle-root", "root", IdxValidCredentialRoot),
+                ($"{mfssiaUrl}/contraindication/root", "contraindicationRoot", IdxContraindicationRoot),
+                ($"{mfssiaUrl}/patient-record/{patientId}/proof", "patientRecordRoot", IdxPatientRecordRoot),
+                ($"{mfssiaUrl}/lab-record/{patientId}", "labRecordRoot", IdxLabRecordRoot),
+            };
 
-            // Contraindication-closure root.
-            var contraResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/contraindication/root");
-            if (!contraResp.TryGetProperty("data", out var contraData) ||
-                !contraData.TryGetProperty("contraindicationRoot", out var contraRoot)) return false;
-            if (ps[IdxContraindicationRoot] != contraRoot.GetString()) return false;
+            foreach (var (url, property, index) in pinned)
+            {
+                var response = await client.GetFromJsonAsync<JsonElement>(url);
+                if (!Mfssia.TryUnwrap(response, out var data) ||
+                    !data.TryGetProperty(property, out var root)) return false;
+                if (ps[index] != root.GetString()) return false;
+            }
 
-            // Drug formulary (policyDrugIds).
+            // The drug formulary pins three consecutive signals rather than one.
             var drugsResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/contraindication/drugs");
-            if (!drugsResp.TryGetProperty("data", out var drugsData) ||
+            if (!Mfssia.TryUnwrap(drugsResp, out var drugsData) ||
                 !drugsData.TryGetProperty("drugIds", out var drugIds) ||
                 drugIds.ValueKind != JsonValueKind.Array) return false;
             var expected = drugIds.EnumerateArray().Select(x => x.GetInt32().ToString()).ToArray();
             for (var i = 0; i < expected.Length && i < 3; i++)
                 if (ps[IdxPolicyDrugId0 + i] != expected[i]) return false;
-
-            // Patient allergy-record root (per-patient, from DKG).
-            var recResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/patient-record/{patientId}/proof");
-            if (!recResp.TryGetProperty("data", out var recData) ||
-                !recData.TryGetProperty("patientRecordRoot", out var recRoot)) return false;
-            if (ps[IdxPatientRecordRoot] != recRoot.GetString()) return false;
-
-            // Patient lab-record root (per-patient, from DKG).
-            var labResp = await client.GetFromJsonAsync<JsonElement>($"{mfssiaUrl}/lab-record/{patientId}");
-            if (!labResp.TryGetProperty("data", out var labData) ||
-                !labData.TryGetProperty("labRecordRoot", out var labRoot)) return false;
-            if (ps[IdxLabRecordRoot] != labRoot.GetString()) return false;
 
             return true;
         }

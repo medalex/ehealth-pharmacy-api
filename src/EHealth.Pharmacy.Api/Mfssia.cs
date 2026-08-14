@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace EHealth.Pharmacy;
 
 // Location of the mfssia-ehealth gateway that fronts the DKG node. The demo stack
@@ -10,4 +12,16 @@ public static class Mfssia
 
     public static string BaseUrl(IConfiguration config) =>
         config[UrlConfigKey] ?? DefaultBaseUrl;
+
+    // Every mfssia payload arrives wrapped as { success, message, data: {...} }. Returns the
+    // data object, or false when the response is shaped otherwise — an error envelope, or
+    // anything else a proxy may have substituted for the service.
+    public static bool TryUnwrap(JsonElement response, out JsonElement data)
+    {
+        if (response.TryGetProperty("data", out data) && data.ValueKind == JsonValueKind.Object)
+            return true;
+
+        data = default;
+        return false;
+    }
 }
