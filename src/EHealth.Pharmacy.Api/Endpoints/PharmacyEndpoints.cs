@@ -105,7 +105,7 @@ public static class PharmacyEndpoints
 
             // Consent first: the patient must have granted the pharmacy access.
             var orgId = config["PharmacyOrganizationId"] ?? "pharmacy-1";
-            if (!await CheckConsent(prescription.PatientId, orgId, http, config))
+            if (!await PatientApi.ConsentGranted(prescription.PatientId, orgId, http, config))
                 return Results.Json(
                     new { error = $"Patient {prescription.PatientId} has not granted consent to {orgId}" },
                     statusCode: 403);
@@ -129,20 +129,6 @@ public static class PharmacyEndpoints
 
             return Results.Ok(new { id, dispensedAt = prescription.DispensedAt });
         });
-    }
-
-    private static async Task<bool> CheckConsent(
-        Guid patientId, string organizationId, IHttpClientFactory http, IConfiguration config)
-    {
-        try
-        {
-            var patientApiUrl = config["PatientApiUrl"] ?? "http://patient-api:3001";
-            var client = http.CreateClient();
-            var resp = await client.GetAsync(
-                $"{patientApiUrl}/api/consents/check?patientId={patientId}&organizationId={organizationId}");
-            return resp.IsSuccessStatusCode;
-        }
-        catch { return false; }
     }
 
     private enum VerifyOutcome { Verified, ProofInvalid, Replay, Unavailable }
